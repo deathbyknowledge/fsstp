@@ -44,7 +44,7 @@ export class Relay extends DurableObject {
     server.serializeAttachment({ role: Role.Sender })
     this.sender = server;
     this.ctx.waitUntil(new Promise(res => {
-      server.send(JSON.stringify({id: this.ctx.id.toString()}));
+      server.send(JSON.stringify({ id: this.ctx.id.toString() }));
       res(null);
     }))
     return new Response(null, { status: 101, webSocket: client });
@@ -56,7 +56,7 @@ export class Relay extends DurableObject {
     server.serializeAttachment({ role: Role.Receiver })
     this.receiver = server;
     this.ctx.waitUntil(new Promise(res => {
-      server.send(JSON.stringify({fileName: this.fileName, fileSize: this.fileSize}));
+      server.send(JSON.stringify({ fileName: this.fileName, fileSize: this.fileSize }));
       res(null);
     }))
     return new Response(null, { status: 101, webSocket: client });
@@ -65,10 +65,15 @@ export class Relay extends DurableObject {
   webSocketMessage(ws: WebSocket, msg: any) {
     if (ws == this.sender) {
       if (this.step == Step.Metadata) {
-      const { fileName, fileSize } = JSON.parse(msg);
-      this.fileName = fileName;
-      this.fileSize = fileSize;
-      this.step = Step.Approval;
+        const { fileName, fileSize } = JSON.parse(msg);
+        this.fileName = fileName;
+        this.fileSize = fileSize;
+        this.step = Step.Approval;
+        this.ctx.blockConcurrencyWhile(async () => {
+          await this.ctx.storage.put('step', this.step);
+          await this.ctx.storage.put('fileName', this.fileName);
+          await this.ctx.storage.put('fileSize', this.fileSize);
+        })
       }
 
       if (this.step == Step.Transfer) {
@@ -80,16 +85,20 @@ export class Relay extends DurableObject {
       if (this.step == Step.Approval) {
         if (msg == "LET_IT_RIP") {
           this.step = Step.Transfer;
+          this.ctx.blockConcurrencyWhile(async () => {
+            await this.ctx.storage.put('step', this.step);
+          });
           this.sender?.send(msg);
         }
       }
     }
   }
 
+
   async fetch(req: Request) {
     const url = new URL(req.url);
 
-    if (url.pathname == '/send') 
+    if (url.pathname == '/send')
       return this.set_sender();
     else
       return this.set_receiver();

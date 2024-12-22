@@ -47,7 +47,7 @@
         return;
       }
 
-      ws = new WebSocket('ws://localhost:8787/get/' + encodeURIComponent(identifier));
+      ws = new WebSocket('/get/' + encodeURIComponent(identifier));
 
       ws.onopen = () => {
         document.getElementById('status').innerText = 'Connected.';
@@ -57,6 +57,7 @@
       ws.onmessage = (event) => {
         if (step == 0) {
           let { fileName, fileSize } = JSON.parse(event.data);
+          if (!fileName || !fileSize) return;
           name = fileName;
           size = fileSize;
           document.getElementById('status').innerText = `Accept file '${fileName} (${fileSize}B)?'`;
