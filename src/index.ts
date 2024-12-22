@@ -1,65 +1,120 @@
 import { DurableObject } from "cloudflare:workers";
+import sender from './sender.html'
+import receiver from './receiver.html'
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.toml`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+enum Role {
+  Sender,
+  Receiver
+}
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 */
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-	}
+enum Step {
+  Metadata,
+  Approval,
+  Transfer
+}
 
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param name - The name provided to a Durable Object instance from a Worker
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(name: string): Promise<string> {
-		return `Hello, ${name}!`;
-	}
+enum SenderStatus {
+  SendingMetadata,
+  SendingData,
+}
+
+type Room = {
+  sender?: WebSocket,
+  receiver?: WebSocket
+}
+
+export class Relay extends DurableObject {
+  sessions: Map<WebSocket, any>;
+  rooms: Map<string, Room>;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sessions = new Map();
+    this.rooms = new Map();
+    this.ctx.getWebSockets().forEach((ws) => {
+      const { id, role, status } = ws.deserializeAttachment();
+      this.sessions.set(ws, { role, id, status });
+      let room = this.rooms.get(id);
+      // Room has not been intialized
+      if (!room) {
+        this.rooms.set(id, role == Role.Sender ? { sender: ws } : { receiver: ws });
+      } else {
+        // Room has already been initalized, just needs to add this ws to it
+        this.rooms.set(id, role == Role.Sender ? { sender: ws, ...room } : { receiver: ws, ...room });
+      }
+    });
+  }
+
+  webSocketMessage(ws: WebSocket, msg: any) {
+    const { role, id, status } = this.sessions.get(ws);
+    if (role == Role.Sender) {
+      // if (status == SenderStatus.SendingMetadata) {
+      // // This message must be a JSON with file metadata.
+      
+
+      // }
+    } 
+    const room = this.rooms.get(id);
+    // room.receiver.send(msg);
+  }
+
+  async fetch(req: Request) {
+    const path = new URL(req.url).pathname
+    console.log(this.sessions);
+    console.log(this.rooms);
+    if (path == '/send') {
+      const [client, server] = Object.values(new WebSocketPair());
+      this.ctx.acceptWebSocket(server);
+      // room id
+      const id = crypto.randomUUID();
+      server.serializeAttachment({ id, role: Role.Sender, status: SenderStatus.SendingMetadata })
+      this.sessions.set(server, id);
+      this.rooms.set(id, { sender: server })
+      const res = new Response(null, { status: 101, webSocket: client });
+      this.ctx.waitUntil(new Promise(resolve => {
+        server.send(JSON.stringify({ id }));
+        resolve(null);
+      }))
+      return res;
+    } else if (path.startsWith('/get/')) {
+      const id = path.split('/')[2]
+      const room = this.rooms.get(id);
+      if (!room) return new Response(`room ${id} not found`, { status: 404 });
+      const [client, server] = Object.values(new WebSocketPair());
+      this.ctx.acceptWebSocket(server);
+      server.serializeAttachment({ id, role: Role.Receiver })
+      this.sessions.set(server, id);
+      this.rooms.set(id, { ...room, receiver: server })
+      console.log('set the room', this.rooms)
+      const res = new Response(null, { status: 101, webSocket: client });
+      return res;
+    }
+    return new Response('bad', { status: 400 });
+  }
+
 }
 
 export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// We will create a `DurableObjectId` using the pathname from the Worker request
-		// This id refers to a unique instance of our 'MyDurableObject' class above
-		let id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(new URL(request.url).pathname);
+  async fetch(request, env, ctx): Promise<Response> {
+    const path = new URL(request.url).pathname
+    if (path == '/send' || path.startsWith('/get/')) {
+      const upgrade = request.headers.get('Upgrade');
+      if (!upgrade || upgrade != 'websocket')
+        return new Response("Exepected websocket upgrade", { status: 426 });
 
-		// This stub creates a communication channel with the Durable Object instance
-		// The Durable Object constructor will be invoked upon the first call for a given id
-		let stub = env.MY_DURABLE_OBJECT.get(id);
+      const id: DurableObjectId = env.RELAY.idFromName('relay');
+      const relay = env.RELAY.get(id);
+      return relay.fetch(request);
+    } else if (path == '/html/sender') {
+      const res = new Response(sender)
+      res.headers.set('content-type', 'text/html')
+      return res;
+    } else if (path == 'html/receiver') {
+      const res = new Response(receiver)
+      res.headers.set('content-type', 'text/html')
+      return res;
+    }
 
-		// We call the `sayHello()` RPC method on the stub to invoke the method on the remote
-		// Durable Object instance
-		let greeting = await stub.sayHello("world");
-
-		return new Response(greeting);
-	},
+    return new Response('stinky', { status: 400 });
+  },
 } satisfies ExportedHandler<Env>;

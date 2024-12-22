@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>File Transfer - Receiver</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Receiver Page</h1>
+  <label>Enter identifier:
+    <input type="text" id="identifier" />
+  </label>
+  <button id="connectBtn">Connect</button>
+
+  <div id="status" style="margin-top:1rem;"></div>
+
+  <script>
+    let ws;
+    let receivedChunks = [];
+
+    // 1) Input an identifier and connect
+    document.getElementById('connectBtn').addEventListener('click', () => {
+      const identifier = document.getElementById('identifier').value.trim();
+      if (!identifier) {
+        alert('Please enter an identifier.');
+        return;
+      }
+
+      // 2) Make a WebSocket connection using the identifier
+      // e.g., ws://localhost:8080/receiver?identifier=XYZ
+      ws = new WebSocket('ws://localhost:8787/get/' + encodeURIComponent(identifier));
+
+      ws.onopen = () => {
+        document.getElementById('status').innerText = 'Connected. Waiting for file chunks...';
+      };
+
+      // 3) Receive messages (file chunks)
+      ws.onmessage = (event) => {
+        // If we detect our special magic number / message to close
+        if (event.data === 'END_OF_FILE') {
+          document.getElementById('status').innerText = 'File transfer complete.';
+          finalizeDownload();
+          ws.close();
+        } else {
+          // Accumulate each chunk
+          receivedChunks.push(event.data);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        document.getElementById('status').innerText = 'Error occurred. Check console.';
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket closed');
+      };
+    });
+
+    // 4) Once the magic message is received, store the file to disk
+    function finalizeDownload() {
+      // Combine all chunks into a Blob
+      const blob = new Blob(receivedChunks);
+      const downloadUrl = URL.createObjectURL(blob);
+
+      // Create a link to prompt a file download
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = 'received-file';
+      link.textContent = 'Download the received file';
+
+      document.body.appendChild(link);
+    }
+  </script>
+</body>
+</html>
+

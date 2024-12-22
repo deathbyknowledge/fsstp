@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>File Transfer - Sender</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 2rem;
+    }
+    #headerOutput {
+      margin-top: 1rem;
+      padding: 0.5rem;
+      border: 1px solid #ccc;
+      width: 300px;
+      height: 50px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Sender Page</h1>
+  <div>
+    <label>Select a file: 
+      <input type="file" id="fileInput" />
+    </label>
+    <button id="connectBtn" disabled>Connect</button>
+  </div>
+
+  <div id="headerOutput">Header will appear here...</div>
+
+  <div>
+    <button id="startSendBtn" disabled>Start Sending</button>
+  </div>
+
+  <script>
+    let ws;
+    let file;
+
+    // 1. Select a file from disk
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      file = e.target.files[0];
+    });
+
+    // 2. Connect to websocket
+    document.getElementById('connectBtn').addEventListener('click', () => {
+      if (!file) return;
+      ws = new WebSocket('/send');
+
+      ws.onopen = () => {
+        console.log('WebSocket connection opened, sending file metadata');
+        
+        ws.send(JSON.stringify({name: file.name, size: file.size}))
+      };
+
+      // 3. Read a "header" from the server. In practice, the server
+      //    must send the header as a message, since browsers don't allow
+      //    direct reading of the upgrade HTTP headers.
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        document.getElementById('headerOutput').innerText = msg.id;
+
+        // 4) Wait until we receive a message from the stream (which we have),
+        //    then enable sending the file in chunks.
+        document.getElementById('startSendBtn').disabled = false;
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket closed');
+      };
+    });
+
+    // 5) Send the file in chunks once we receive a signal
+    document.getElementById('startSendBtn').addEventListener('click', async () => {
+      if (!file || !ws) return;
+
+      // Example chunk size (64 KB):
+      const chunkSize = 64 * 1024;
+      let offset = 0;
+
+      while (offset < file.size) {
+        const blobPart = file.slice(offset, offset + chunkSize);
+        const arrayBuffer = await blobPart.arrayBuffer();
+
+        // Send each chunk over the WebSocket
+        ws.send(arrayBuffer);
+
+        offset += chunkSize;
+        // Slight delay to avoid saturating the connection
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+
+      // Send a magic message (e.g., "EOF") to indicate we're done
+      ws.send('END_OF_FILE');
+      console.log('All file chunks sent');
+    });
+  </script>
+</body>
+</html>
+
