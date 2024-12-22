@@ -1,3 +1,4 @@
+import { Hono } from 'hono'
 import { DurableObject } from "cloudflare:workers";
 import sender from './sender.html'
 import receiver from './receiver.html'
@@ -13,108 +14,116 @@ enum Step {
   Transfer
 }
 
-enum SenderStatus {
-  SendingMetadata,
-  SendingData,
-}
-
-type Room = {
-  sender?: WebSocket,
-  receiver?: WebSocket
-}
-
 export class Relay extends DurableObject {
-  sessions: Map<WebSocket, any>;
-  rooms: Map<string, Room>;
+  sender?: WebSocket;
+  receiver?: WebSocket;
+  step: Step;
+  fileName?: string;
+  fileSize?: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.sessions = new Map();
-    this.rooms = new Map();
-    this.ctx.getWebSockets().forEach((ws) => {
-      const { id, role, status } = ws.deserializeAttachment();
-      this.sessions.set(ws, { role, id, status });
-      let room = this.rooms.get(id);
-      // Room has not been intialized
-      if (!room) {
-        this.rooms.set(id, role == Role.Sender ? { sender: ws } : { receiver: ws });
-      } else {
-        // Room has already been initalized, just needs to add this ws to it
-        this.rooms.set(id, role == Role.Sender ? { sender: ws, ...room } : { receiver: ws, ...room });
-      }
+    this.step = Step.Metadata;
+
+    ctx.blockConcurrencyWhile(async () => {
+      this.step = (await ctx.storage.get('step')) || Step.Metadata;
+      this.fileName = await ctx.storage.get('fileName');
+      this.fileSize = await ctx.storage.get('fileSize');
+
+      ctx.getWebSockets().forEach(ws => {
+        const { role } = ws.deserializeAttachment();
+        if (role == Role.Sender) this.sender = ws;
+        else this.receiver = ws;
+      })
     });
   }
 
-  webSocketMessage(ws: WebSocket, msg: any) {
-    const { role, id, status } = this.sessions.get(ws);
-    if (role == Role.Sender) {
-      // if (status == SenderStatus.SendingMetadata) {
-      // // This message must be a JSON with file metadata.
-      
+  set_sender() {
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ role: Role.Sender })
+    this.sender = server;
+    this.ctx.waitUntil(new Promise(res => {
+      server.send(JSON.stringify({id: this.ctx.id.toString()}));
+      res(null);
+    }))
+    return new Response(null, { status: 101, webSocket: client });
+  }
 
-      // }
-    } 
-    const room = this.rooms.get(id);
-    // room.receiver.send(msg);
+  set_receiver() {
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ role: Role.Receiver })
+    this.receiver = server;
+    this.ctx.waitUntil(new Promise(res => {
+      server.send(JSON.stringify({fileName: this.fileName, fileSize: this.fileSize}));
+      res(null);
+    }))
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  webSocketMessage(ws: WebSocket, msg: any) {
+    if (ws == this.sender) {
+      if (this.step == Step.Metadata) {
+      const { fileName, fileSize } = JSON.parse(msg);
+      this.fileName = fileName;
+      this.fileSize = fileSize;
+      this.step = Step.Approval;
+      }
+
+      if (this.step == Step.Transfer) {
+        this.receiver?.send(msg)
+      }
+    }
+
+    if (ws == this.receiver) {
+      if (this.step == Step.Approval) {
+        if (msg == "LET_IT_RIP") {
+          this.step = Step.Transfer;
+          this.sender?.send(msg);
+        }
+      }
+    }
   }
 
   async fetch(req: Request) {
-    const path = new URL(req.url).pathname
-    console.log(this.sessions);
-    console.log(this.rooms);
-    if (path == '/send') {
-      const [client, server] = Object.values(new WebSocketPair());
-      this.ctx.acceptWebSocket(server);
-      // room id
-      const id = crypto.randomUUID();
-      server.serializeAttachment({ id, role: Role.Sender, status: SenderStatus.SendingMetadata })
-      this.sessions.set(server, id);
-      this.rooms.set(id, { sender: server })
-      const res = new Response(null, { status: 101, webSocket: client });
-      this.ctx.waitUntil(new Promise(resolve => {
-        server.send(JSON.stringify({ id }));
-        resolve(null);
-      }))
-      return res;
-    } else if (path.startsWith('/get/')) {
-      const id = path.split('/')[2]
-      const room = this.rooms.get(id);
-      if (!room) return new Response(`room ${id} not found`, { status: 404 });
-      const [client, server] = Object.values(new WebSocketPair());
-      this.ctx.acceptWebSocket(server);
-      server.serializeAttachment({ id, role: Role.Receiver })
-      this.sessions.set(server, id);
-      this.rooms.set(id, { ...room, receiver: server })
-      console.log('set the room', this.rooms)
-      const res = new Response(null, { status: 101, webSocket: client });
-      return res;
-    }
-    return new Response('bad', { status: 400 });
-  }
+    const url = new URL(req.url);
 
+    if (url.pathname == '/send') 
+      return this.set_sender();
+    else
+      return this.set_receiver();
+  }
 }
 
-export default {
-  async fetch(request, env, ctx): Promise<Response> {
-    const path = new URL(request.url).pathname
-    if (path == '/send' || path.startsWith('/get/')) {
-      const upgrade = request.headers.get('Upgrade');
-      if (!upgrade || upgrade != 'websocket')
-        return new Response("Exepected websocket upgrade", { status: 426 });
+type Bindings = {
+  RELAY: DurableObjectNamespace<Relay>
+}
 
-      const id: DurableObjectId = env.RELAY.idFromName('relay');
-      const relay = env.RELAY.get(id);
-      return relay.fetch(request);
-    } else if (path == '/html/sender') {
-      const res = new Response(sender)
-      res.headers.set('content-type', 'text/html')
-      return res;
-    } else if (path == 'html/receiver') {
-      const res = new Response(receiver)
-      res.headers.set('content-type', 'text/html')
-      return res;
-    }
+const app = new Hono<{ Bindings: Bindings }>();
 
-    return new Response('stinky', { status: 400 });
-  },
-} satisfies ExportedHandler<Env>;
+app.get('/send', (c) => {
+  const upgrade = c.req.header('Upgrade');
+  if (!upgrade || upgrade != 'websocket')
+    return new Response("Exepected websocket upgrade", { status: 426 });
+
+  const id = c.env.RELAY.newUniqueId();
+  const relay = c.env.RELAY.get(id);
+  return relay.fetch(c.req.raw)
+})
+
+app.get('/get/:id', (c) => {
+  const upgrade = c.req.header('Upgrade');
+  if (!upgrade || upgrade != 'websocket')
+    return new Response("Exepected websocket upgrade", { status: 426 });
+
+  const id = c.env.RELAY.idFromString(c.req.param('id'));
+  const relay = c.env.RELAY.get(id);
+  return relay.fetch(c.req.raw)
+})
+
+// HTML
+app.get('/sender', (c) => c.html(sender))
+app.get('/receiver', (c) => c.html(receiver))
+
+export default app;

@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html>
+
 <head>
   <meta charset="utf-8" />
   <title>File Transfer - Receiver</title>
@@ -8,8 +9,13 @@
       font-family: sans-serif;
       margin: 2rem;
     }
+
+    #progressContainer {
+      margin-top: 1rem;
+    }
   </style>
 </head>
+
 <body>
   <h1>Receiver Page</h1>
   <label>Enter identifier:
@@ -18,10 +24,20 @@
   <button id="connectBtn">Connect</button>
 
   <div id="status" style="margin-top:1rem;"></div>
+  <button id="acceptBtn" style="display:none;">Accept</button>
+
+  <div id="progressContainer" style="display:none;">
+    <progress id="progressReceiver" max="100" value="0" style="width:300px;"></progress>
+    <span id="progressReceiverLabel">0%</span>
+  </div>
 
   <script>
     let ws;
     let receivedChunks = [];
+    let step = 0;
+    let name;
+    let size;
+    let totalReceived = 0;
 
     // 1) Input an identifier and connect
     document.getElementById('connectBtn').addEventListener('click', () => {
@@ -31,25 +47,43 @@
         return;
       }
 
-      // 2) Make a WebSocket connection using the identifier
-      // e.g., ws://localhost:8080/receiver?identifier=XYZ
       ws = new WebSocket('ws://localhost:8787/get/' + encodeURIComponent(identifier));
 
       ws.onopen = () => {
-        document.getElementById('status').innerText = 'Connected. Waiting for file chunks...';
+        document.getElementById('status').innerText = 'Connected.';
       };
 
       // 3) Receive messages (file chunks)
       ws.onmessage = (event) => {
-        // If we detect our special magic number / message to close
-        if (event.data === 'END_OF_FILE') {
-          document.getElementById('status').innerText = 'File transfer complete.';
-          finalizeDownload();
-          ws.close();
+        if (step == 0) {
+          let { fileName, fileSize } = JSON.parse(event.data);
+          name = fileName;
+          size = fileSize;
+          document.getElementById('status').innerText = `Accept file '${fileName} (${fileSize}B)?'`;
+          document.getElementById('acceptBtn').style = 'display:block;';
+          document.getElementById('acceptBtn').addEventListener('click', () => {
+            step = 1;
+            ws.send('LET_IT_RIP');
+            document.getElementById('progressContainer').style = 'display:block;';
+          })
         } else {
-          // Accumulate each chunk
-          receivedChunks.push(event.data);
+          // If we detect our special magic message to close
+          if (event.data === 'END_OF_FILE') {
+            document.getElementById('status').innerText = 'File transfer complete.';
+            finalizeDownload();
+            ws.close();
+          } else {
+            // Accumulate each chunk
+            console.log(event.data);
+            receivedChunks.push(event.data);
+            // Update progress
+            totalReceived += event.data.size || 0;
+            const progressPercent = Math.floor((totalReceived / size) * 100);
+            document.getElementById('progressReceiver').value = progressPercent;
+            document.getElementById('progressReceiverLabel').textContent = progressPercent + '%';
+          }
         }
+
       };
 
       ws.onerror = (error) => {
@@ -71,12 +105,12 @@
       // Create a link to prompt a file download
       const link = document.createElement('a');
       link.href = downloadUrl;
-      link.download = 'received-file';
+      link.download = name;
       link.textContent = 'Download the received file';
 
       document.body.appendChild(link);
     }
   </script>
 </body>
-</html>
 
+</html>
